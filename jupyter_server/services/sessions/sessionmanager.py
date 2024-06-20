@@ -209,6 +209,7 @@ class SessionManager(LoggingConfigurable):
     _cursor = None
     _connection = None
     _columns = {"session_id", "path", "name", "type", "kernel_id"}
+    _custom_envs = None
 
     @property
     def cursor(self):
@@ -268,6 +269,7 @@ class SessionManager(LoggingConfigurable):
         kernel_name: Optional[KernelName] = None,
         kernel_id: Optional[str] = None,
         custom_kernel_specs: Optional[Dict[str, Any]] = None,
+        custom_env: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Creates a session and returns its model
 
@@ -285,8 +287,9 @@ class SessionManager(LoggingConfigurable):
         else:
             #
             kernel_id = await self.start_kernel_for_session(
-                session_id, path, name, type, kernel_name, custom_kernel_specs
+                session_id, path, name, type, kernel_name, custom_kernel_specs, custom_env
             )
+        self._custom_envs[kernel_id] = custom_env
         record.kernel_id = kernel_id
         self._pending_sessions.update(record)
         result = await self.save_session(
@@ -323,6 +326,7 @@ class SessionManager(LoggingConfigurable):
         type: Optional[str],
         kernel_name: Optional[KernelName],
         custom_kernel_specs: Optional[Dict[str, Any]] = None,
+        custom_env: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Start a new kernel for a given session.
 
@@ -341,17 +345,27 @@ class SessionManager(LoggingConfigurable):
             the name of the kernel specification to use.  The default kernel name will be used if not provided.
         custom_kernel_specs: dict
             dictionary of kernel custom specifications
+        custom_env: dict
+            dictionary of custom env variables
         """
         # allow contents manager to specify kernels cwd
         kernel_path = await ensure_async(self.contents_manager.get_kernel_path(path=path))
 
         kernel_env = self.get_kernel_env(path, name)
+        
+        # if we have custom env than we have to add them to available env variables
+        if custom_env is not None and isinstance(custom_env, dict):
+            for key, value in custom_env.items():
+                kernel_env[key] = value
+
         kernel_id = await self.kernel_manager.start_kernel(
             path=kernel_path,
             kernel_name=kernel_name,
             env=kernel_env,
             custom_kernel_specs=custom_kernel_specs,
+            custom_env=custom_env,
         )
+        self._custom_envs[kernel_id] = custom_env
         return cast(str, kernel_id)
 
     async def save_session(self, session_id, path=None, name=None, type=None, kernel_id=None):
@@ -471,6 +485,13 @@ class SessionManager(LoggingConfigurable):
                 "SELECT path, name, kernel_id FROM session WHERE session_id=?", [session_id]
             )
             path, name, kernel_id = self.cursor.fetchone()
+            env = self.get_kernel_env(path, name)
+
+            # if we have custom env than we have to add them to available env variables
+            if self._custom_envs is not None and isinstance(self._custom_envs, dict):
+                if self._custom_envs[kernel_id] is not None and isinstance(self._custom_envs[kernel_id], dict):
+                    for key, value in self._custom_envs[kernel_id].items():
+                        env[key] = value
             self.kernel_manager.update_env(kernel_id=kernel_id, env=self.get_kernel_env(path, name))
 
     async def kernel_culled(self, kernel_id: str) -> bool:
